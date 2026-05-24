@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import shutil
 import subprocess
 
 
@@ -109,6 +111,8 @@ def build_script_prompt(prompt_body, keyword, output_name):
 </OUTPUT_FILE>
 
 Generate the final script from KEYWORD by following SCRIPT_TEMPLATE.
+The entire generated script must be fewer than 500 characters total, including spaces and line breaks.
+This 500-character limit is mandatory even if SCRIPT_TEMPLATE describes per-post limits.
 Write only the generated script text to OUTPUT_FILE in the current directory.
 Do not modify any other files.
 """
@@ -159,15 +163,45 @@ def run_codex_exec(prompt, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        CODEX_BIN,
+        *resolve_codex_command(),
         "exec",
         "--sandbox",
         CODEX_SANDBOX,
         "--cd",
         str(output_dir),
         "--skip-git-repo-check",
-        prompt,
+        "-",
     ]
 
-    completed = subprocess.run(cmd, check=False, stdin=subprocess.DEVNULL)
+    completed = subprocess.run(cmd, check=False, input=prompt, text=True, encoding="utf-8")
     return completed.returncode
+
+
+def resolve_codex_command():
+    """
+    현재 OS에서 실행 가능한 Codex CLI 명령 배열을 반환합니다.
+
+    input:
+        없음.
+    output:
+        subprocess.run에 넘길 Codex CLI 명령 배열.
+    """
+    if os.name == "nt":
+        cmd_path = shutil.which("codex.cmd")
+        if cmd_path:
+            base_dir = Path(cmd_path).resolve().parent
+            script_path = base_dir / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+            node_path = base_dir / "node.exe"
+            if script_path.exists():
+                if node_path.exists():
+                    return [str(node_path), str(script_path)]
+
+                system_node = shutil.which("node.exe") or shutil.which("node")
+                if system_node:
+                    return [system_node, str(script_path)]
+
+        exe_path = shutil.which("codex.exe")
+        if exe_path:
+            return [exe_path]
+
+    return [shutil.which(CODEX_BIN) or CODEX_BIN]

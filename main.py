@@ -1,12 +1,10 @@
 import argparse
-import re
+import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pymysql
 from dotenv import load_dotenv
-from PIL import Image
 
 from codex_exec import (
     build_image_prompt,
@@ -17,91 +15,84 @@ from codex_exec import (
     template_keys,
 )
 from db_connector import (
-    fetch_latest_keyword,
-    keyword_exists,
+    execute_write,
+    fetch_one,
     mysql_connect_kwargs,
-    update_content_by_keyword,
-    update_image_paths_by_keyword,
+)
+from utils.common_util import (
+    build_keyword_stem,
+    choose_output_stem,
+    optimize_image_file,
+    resolve_output_dir,
+    resolve_script_file,
+    resolve_target_date,
 )
 
 
-TARGET_IMAGE_MAX_SIDE = 1024
-MAX_IMAGE_BYTES = 1_000_000
+PUBLISH_CONTENT_SELECT_COLUMNS = """
+    idx,
+    category,
+    keyword,
+    content,
+    image_paths,
+    target_date,
+    threads_status,
+    website_status
+"""
 
-HANGUL_INITIALS = (
-    "g",
-    "kk",
-    "n",
-    "d",
-    "tt",
-    "r",
-    "m",
-    "b",
-    "pp",
-    "s",
-    "ss",
-    "",
-    "j",
-    "jj",
-    "ch",
-    "k",
-    "t",
-    "p",
-    "h",
-)
-HANGUL_VOWELS = (
-    "a",
-    "ae",
-    "ya",
-    "yae",
-    "eo",
-    "e",
-    "yeo",
-    "ye",
-    "o",
-    "wa",
-    "wae",
-    "oe",
-    "yo",
-    "u",
-    "wo",
-    "we",
-    "wi",
-    "yu",
-    "eu",
-    "ui",
-    "i",
-)
-HANGUL_FINALS = (
-    "",
-    "k",
-    "k",
-    "k",
-    "n",
-    "n",
-    "n",
-    "t",
-    "l",
-    "k",
-    "m",
-    "l",
-    "l",
-    "l",
-    "p",
-    "l",
-    "m",
-    "p",
-    "p",
-    "t",
-    "t",
-    "ng",
-    "t",
-    "t",
-    "k",
-    "t",
-    "p",
-    "t",
-)
+PUBLISH_CONTENT_BY_DATE_QUERY = f"""
+SELECT
+{PUBLISH_CONTENT_SELECT_COLUMNS}
+FROM n8n_publish_content
+WHERE target_date = %(target_date)s
+  AND keyword IS NOT NULL
+  AND TRIM(keyword) <> ''
+ORDER BY idx DESC
+LIMIT 1
+"""
+
+PUBLISH_CONTENT_BY_KEYWORD_DATE_QUERY = f"""
+SELECT
+{PUBLISH_CONTENT_SELECT_COLUMNS}
+FROM n8n_publish_content
+WHERE target_date = %(target_date)s
+  AND keyword = %(keyword)s
+  AND category = %(category)s
+ORDER BY idx DESC
+LIMIT 1
+"""
+
+PUBLISH_CONTENT_BY_IDX_QUERY = f"""
+SELECT
+{PUBLISH_CONTENT_SELECT_COLUMNS}
+FROM n8n_publish_content
+WHERE idx = %(idx)s
+LIMIT 1
+"""
+
+INSERT_PUBLISH_CONTENT_QUERY = """
+INSERT INTO n8n_publish_content (category, keyword, target_date)
+VALUES (%(category)s, %(keyword)s, %(target_date)s)
+"""
+
+UPDATE_CONTENT_BY_IDX_QUERY = """
+UPDATE n8n_publish_content
+SET content = %(content)s
+WHERE idx = %(idx)s
+"""
+
+UPDATE_IMAGE_PATHS_BY_IDX_QUERY = """
+UPDATE n8n_publish_content
+SET image_paths = %(image_paths)s
+WHERE idx = %(idx)s
+"""
+
+TEMPLATE_CATEGORIES = {
+    "3s_quiz": "3초퀴즈",
+    "explain_child": "자녀에게설명하기",
+}
+
+MAX_CONTENT_CHARS = 500
 
 
 def parse_args(argv):
@@ -130,11 +121,11 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--date",
-        help="Keyword date to load from MySQL in YYYY-MM-DD format. Defaults to today.",
+        help="Keyword date to load or insert in MySQL using YYYY-MM-DD format. Defaults to today.",
     )
     parser.add_argument(
         "--keyword",
-        help="Keyword to use directly. If provided, MySQL keyword lookup is skipped.",
+        help="Keyword to use directly. If provided, the row for --date is loaded or inserted.",
     )
     parser.add_argument(
         "--script-file",
@@ -148,188 +139,329 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def resolve_target_date(date_text):
+def has_field_value(value):
     """
-    CLI로 받은 날짜값을 DB 조회용 날짜 문자열로 변환합니다.
+    DB 필드에 실제 값이 채워져 있는지 확인합니다.
 
     input:
-        date_text: YYYY-MM-DD 형식의 날짜 문자열. 값이 없으면 오늘 날짜를 사용합니다.
+        value: DB에서 조회한 필드 값.
     output:
-        YYYY-MM-DD 형식의 날짜 문자열.
+        값이 None이 아니고 공백 제거 후 비어 있지 않으면 True.
     """
-    if not date_text:
-        return datetime.now().date().isoformat()
+    return value is not None and bool(str(value).strip())
 
+
+def has_image_paths_value(value):
+    """
+    image_paths 필드에 실제 이미지 경로가 들어 있는지 확인합니다.
+
+    input:
+        value: DB에서 조회한 image_paths 필드 값.
+    output:
+        공백, 빈 JSON 배열, 빈 JSON 객체가 아니면 True.
+    """
+    if not has_field_value(value):
+        return False
+
+    text = str(value).strip()
+    return text not in {"[]", "{}", '""'}
+
+
+def get_direct_keyword(args):
+    """
+    CLI에서 직접 전달된 키워드를 정리합니다.
+
+    input:
+        args: CLI 실행 옵션 Namespace.
+    output:
+        직접 입력된 키워드 문자열. 값이 없으면 None.
+    """
+    if args.keyword and args.keyword.strip():
+        return args.keyword.strip()
+    return None
+
+
+def resolve_template_category(template_key):
+    """
+    프롬프트 템플릿 키를 DB category 값으로 변환합니다.
+
+    input:
+        template_key: CLI로 받은 템플릿 키.
+    output:
+        n8n_publish_content.category에 저장할 한글 카테고리명.
+    """
     try:
-        return datetime.strptime(date_text, "%Y-%m-%d").date().isoformat()
-    except ValueError as exc:
-        raise ValueError("--date must use YYYY-MM-DD format.") from exc
+        return TEMPLATE_CATEGORIES[template_key]
+    except KeyError:
+        allowed = ", ".join(sorted(TEMPLATE_CATEGORIES))
+        raise ValueError(f"Unknown template category {template_key!r}. Use one of: {allowed}") from None
 
 
-def resolve_output_dir(root_dir, output_dir_text):
+def validate_content_length(content):
     """
-    출력 폴더 문자열을 절대 경로로 변환합니다.
+    DB content 필드에 저장할 생성 텍스트 길이를 검증합니다.
 
     input:
-        root_dir: 프로젝트 루트 디렉터리 경로.
-        output_dir_text: CLI로 받은 출력 폴더 경로 문자열.
+        content: 생성된 스크립트 텍스트.
     output:
-        절대 경로로 변환된 출력 폴더 Path 객체.
+        없음. 500자 이상이면 ValueError를 발생시킵니다.
     """
-    output_dir = Path(output_dir_text)
-    if not output_dir.is_absolute():
-        output_dir = root_dir / output_dir
-    return output_dir
+    length = len(content)
+    if length >= MAX_CONTENT_CHARS:
+        raise ValueError(f"Generated content must be fewer than 500 characters. actual={length}")
 
 
-def resolve_script_file(root_dir, script_file_text):
+def normalize_publish_content_row(row):
     """
-    이미지 생성에 사용할 스크립트 파일 경로를 확인합니다.
+    조회된 n8n_publish_content row의 키워드를 검증하고 정리합니다.
 
     input:
-        root_dir: 프로젝트 루트 디렉터리 경로.
-        script_file_text: CLI로 받은 스크립트 파일 경로 문자열.
+        row: DB에서 조회한 row 딕셔너리.
     output:
-        존재가 확인된 스크립트 파일 Path 객체.
+        keyword가 정리된 row 딕셔너리.
     """
-    script_file = Path(script_file_text)
-    if not script_file.is_absolute():
-        script_file = root_dir / script_file
-    if not script_file.exists():
-        raise FileNotFoundError(f"Script file not found: {script_file}")
-    return script_file
+    keyword = row.get("keyword")
+    if keyword is None or not str(keyword).strip():
+        raise ValueError("Keyword text from MySQL is empty.")
+
+    row["keyword"] = str(keyword).strip()
+    return row
 
 
-def resolve_keyword(args, db_config):
+def fetch_publish_content_by_date(db_config, target_date):
     """
-    직접 입력 키워드 또는 DB 조회 키워드를 결정합니다.
+    n8n_publish_content 테이블에서 지정 날짜의 최신 콘텐츠 row를 조회합니다.
+
+    input:
+        db_config: MySQL 접속 설정 딕셔너리.
+        target_date: 조회 기준 날짜 문자열 (YYYY-MM-DD).
+    output:
+        idx, keyword, content, image_paths 등을 포함한 row 딕셔너리.
+    """
+    row = fetch_one(
+        db_config,
+        PUBLISH_CONTENT_BY_DATE_QUERY,
+        {"target_date": target_date},
+    )
+    if not row:
+        raise ValueError(f"No n8n_publish_content row returned for target_date={target_date}.")
+
+    return normalize_publish_content_row(row)
+
+
+def fetch_publish_content_by_keyword_date(db_config, keyword, target_date, category):
+    """
+    n8n_publish_content 테이블에서 지정 키워드와 날짜의 최신 row를 조회합니다.
+
+    input:
+        db_config: MySQL 접속 설정 딕셔너리.
+        keyword: 조회할 키워드 문자열.
+        target_date: 조회 기준 날짜 문자열 (YYYY-MM-DD).
+        category: 조회할 카테고리 문자열.
+    output:
+        row 딕셔너리. 없으면 None.
+    """
+    row = fetch_one(
+        db_config,
+        PUBLISH_CONTENT_BY_KEYWORD_DATE_QUERY,
+        {"category": category, "keyword": keyword, "target_date": target_date},
+    )
+    if not row:
+        return None
+
+    return normalize_publish_content_row(row)
+
+
+def fetch_publish_content_by_idx(db_config, idx):
+    """
+    n8n_publish_content 테이블에서 idx가 일치하는 row를 조회합니다.
+
+    input:
+        db_config: MySQL 접속 설정 딕셔너리.
+        idx: 조회할 n8n_publish_content 기본키.
+    output:
+        row 딕셔너리.
+    """
+    row = fetch_one(db_config, PUBLISH_CONTENT_BY_IDX_QUERY, {"idx": idx})
+    if not row:
+        raise ValueError(f"No n8n_publish_content row returned for idx={idx}.")
+
+    return normalize_publish_content_row(row)
+
+
+def insert_publish_content_keyword_date(db_config, keyword, target_date, category):
+    """
+    n8n_publish_content 테이블에 키워드와 날짜만 가진 신규 row를 생성합니다.
+
+    input:
+        db_config: MySQL 접속 설정 딕셔너리.
+        keyword: 신규 row에 저장할 키워드 문자열.
+        target_date: 신규 row에 저장할 날짜 문자열 (YYYY-MM-DD).
+        category: 신규 row에 저장할 카테고리 문자열.
+    output:
+        생성된 row 딕셔너리.
+    """
+    result = execute_write(
+        db_config,
+        INSERT_PUBLISH_CONTENT_QUERY,
+        {"category": category, "keyword": keyword, "target_date": target_date},
+    )
+    return fetch_publish_content_by_idx(db_config, result["lastrowid"])
+
+
+def update_content_by_idx(db_config, idx, content):
+    """
+    idx가 일치하는 행의 content 필드를 업데이트합니다.
+
+    input:
+        db_config: MySQL 접속 설정 딕셔너리.
+        idx: 업데이트 대상 n8n_publish_content 행의 기본키.
+        content: content 필드에 저장할 생성 스크립트.
+    output:
+        업데이트된 행 수.
+    """
+    result = execute_write(
+        db_config,
+        UPDATE_CONTENT_BY_IDX_QUERY,
+        {"idx": idx, "content": content},
+    )
+    return result["affected_rows"]
+
+
+def update_image_paths_by_idx(db_config, idx, image_paths):
+    """
+    idx가 일치하는 행의 image_paths 필드를 업데이트합니다.
+
+    input:
+        db_config: MySQL 접속 설정 딕셔너리.
+        idx: 업데이트 대상 n8n_publish_content 행의 기본키.
+        image_paths: image_paths 필드에 저장할 이미지 파일명 또는 경로 문자열.
+    output:
+        업데이트된 행 수.
+    """
+    result = execute_write(
+        db_config,
+        UPDATE_IMAGE_PATHS_BY_IDX_QUERY,
+        {"idx": idx, "image_paths": image_paths},
+    )
+    return result["affected_rows"]
+
+
+def load_target_content_row(args, db_config):
+    """
+    키워드가 직접 주어지지 않았을 때 작업 대상 DB row를 조회합니다.
 
     input:
         args: CLI 실행 옵션 Namespace.
         db_config: MySQL 접속 설정 딕셔너리.
     output:
-        콘텐츠 생성에 사용할 키워드 문자열.
+        지정 날짜의 최신 n8n_publish_content row 딕셔너리.
     """
-    if args.keyword and args.keyword.strip():
-        return args.keyword.strip()
-
     target_date = resolve_target_date(args.date)
-    return fetch_latest_keyword(db_config, target_date)
+    return fetch_publish_content_by_date(db_config, target_date)
 
 
-def update_generated_script_content(db_config, keyword, script_path):
+def load_or_insert_direct_keyword_row(args, db_config, keyword):
+    """
+    직접 입력된 키워드와 날짜에 해당하는 row를 조회하고, 없으면 새로 생성합니다.
+
+    input:
+        args: CLI 실행 옵션 Namespace.
+        db_config: MySQL 접속 설정 딕셔너리.
+        keyword: 직접 입력된 키워드 문자열.
+    output:
+        조회 또는 생성된 n8n_publish_content row 딕셔너리.
+    """
+    target_date = resolve_target_date(args.date)
+    category = resolve_template_category(args.template)
+    target_row = fetch_publish_content_by_keyword_date(db_config, keyword, target_date, category)
+    if target_row:
+        print_target_row_status(target_row)
+        return target_row
+
+    target_row = insert_publish_content_keyword_date(db_config, keyword, target_date, category)
+    print(
+        "db_row_inserted: "
+        f"idx={target_row.get('idx')} "
+        f"category={target_row.get('category')} "
+        f"keyword={target_row.get('keyword')} "
+        f"target_date={target_row.get('target_date')}"
+    )
+    return target_row
+
+
+def print_target_row_status(target_row):
+    """
+    자동 조회된 DB row의 작업 상태를 콘솔에 출력합니다.
+
+    input:
+        target_row: n8n_publish_content에서 조회한 row 딕셔너리.
+    output:
+        idx, keyword, content/image_paths 세팅 여부를 stdout에 출력합니다.
+    """
+    content_set = has_field_value(target_row.get("content"))
+    image_paths_set = has_image_paths_value(target_row.get("image_paths"))
+    print(
+        "db_row: "
+        f"idx={target_row.get('idx')} "
+        f"keyword={target_row.get('keyword')} "
+        f"content_set={content_set} "
+        f"image_paths_set={image_paths_set}"
+    )
+
+
+def write_existing_script_file(output_stem, output_dir, script_text):
+    """
+    DB에 이미 저장된 content를 출력 폴더의 스크립트 파일로 저장합니다.
+
+    input:
+        output_stem: 생성 파일명에 사용할 stem.
+        output_dir: 스크립트 파일을 저장할 출력 폴더 경로.
+        script_text: DB content 필드에 저장되어 있던 스크립트 문자열.
+    output:
+        저장된 스크립트 파일 Path 객체.
+    """
+    if not script_text or not script_text.strip():
+        raise ValueError("DB content is empty.")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    script_path = output_dir / f"{output_stem}_script.txt"
+    script_path.write_text(script_text.strip(), encoding="utf-8")
+    return script_path
+
+
+def update_generated_script_content(db_config, script_path, target_row):
     """
     생성된 스크립트 파일 내용을 DB content 필드에 저장합니다.
 
     input:
         db_config: MySQL 접속 설정 딕셔너리.
-        keyword: 업데이트 대상 행을 찾기 위한 키워드.
         script_path: 생성된 스크립트 텍스트 파일 경로.
+        target_row: 업데이트 대상 DB row. idx 기준으로 업데이트합니다.
     output:
         DB에서 업데이트된 행 수.
     """
     script_text = script_path.read_text(encoding="utf-8").strip()
     if not script_text:
         raise ValueError(f"Script file is empty: {script_path}")
-    return update_content_by_keyword(db_config, keyword=keyword, content=script_text)
+    validate_content_length(script_text)
+
+    return update_content_by_idx(db_config, target_row["idx"], script_text)
 
 
-def update_generated_image_path(db_config, keyword, image_path):
+def update_generated_image_path(db_config, image_path, target_row):
     """
     생성된 이미지 파일명을 DB image_paths 필드에 저장합니다.
 
     input:
         db_config: MySQL 접속 설정 딕셔너리.
-        keyword: 업데이트 대상 행을 찾기 위한 키워드.
         image_path: 생성된 이미지 파일 경로.
+        target_row: 업데이트 대상 DB row. idx 기준으로 업데이트합니다.
     output:
         DB에서 업데이트된 행 수.
     """
-    return update_image_paths_by_keyword(
-        db_config,
-        keyword=keyword,
-        image_paths=image_path.name,
-    )
-
-
-def romanize_hangul(text):
-    """
-    한글 문자열을 파일명에 사용할 수 있는 간단한 로마자 문자열로 변환합니다.
-
-    input:
-        text: 한글 또는 영문이 포함된 원본 문자열.
-    output:
-        ASCII 로마자 중심으로 변환된 문자열.
-    """
-    pieces = []
-    for char in text:
-        code = ord(char)
-        if 0xAC00 <= code <= 0xD7A3:
-            offset = code - 0xAC00
-            initial = offset // 588
-            vowel = (offset % 588) // 28
-            final = offset % 28
-            pieces.append(
-                HANGUL_INITIALS[initial] + HANGUL_VOWELS[vowel] + HANGUL_FINALS[final]
-            )
-        else:
-            pieces.append(char)
-    return "".join(pieces)
-
-
-def build_keyword_stem(keyword):
-    """
-    키워드 기반의 짧은 파일명 stem을 생성합니다.
-
-    input:
-        keyword: 콘텐츠 생성에 사용한 키워드.
-    output:
-        영문, 숫자, 밑줄로만 구성된 파일명 stem 문자열.
-    """
-    romanized = romanize_hangul(keyword).lower()
-    stem = re.sub(r"[^a-z0-9]+", "_", romanized).strip("_")
-    stem = re.sub(r"_+", "_", stem)
-    if not stem:
-        stem = "keyword"
-    return stem[:32].strip("_") or "keyword"
-
-
-def build_timestamp_prefix():
-    """
-    파일명 앞에 붙일 현재 시각 기반 prefix를 생성합니다.
-
-    input:
-        없음.
-    output:
-        yymmdd_hhmmss 형식의 시간 문자열.
-    """
-    return datetime.now().strftime("%y%m%d_%H%M%S")
-
-
-def choose_output_stem(output_dir, base_stem, mode):
-    """
-    출력 폴더에서 충돌하지 않는 최종 파일명 stem을 선택합니다.
-
-    input:
-        output_dir: 생성 파일을 저장할 출력 폴더 경로.
-        base_stem: 키워드에서 만든 기본 파일명 stem.
-        mode: 실행 모드 문자열 (all, script, image).
-    output:
-        timestamp와 키워드 stem이 포함된 충돌 없는 파일명 stem.
-    """
-    suffixes = []
-    if mode in {"all", "script"}:
-        suffixes.append("_script.txt")
-    if mode in {"all", "image"}:
-        suffixes.append(".png")
-
-    timestamped_stem = f"{build_timestamp_prefix()}_{base_stem}"
-    stem = timestamped_stem
-    index = 2
-    while any((output_dir / f"{stem}{suffix}").exists() for suffix in suffixes):
-        stem = f"{timestamped_stem}_{index}"
-        index += 1
-    return stem
+    image_paths = json.dumps([image_path.name], ensure_ascii=False)
+    return update_image_paths_by_idx(db_config, target_row["idx"], image_paths)
 
 
 def generate_script_file(keyword, output_stem, script_prompt_body, output_dir):
@@ -385,62 +517,6 @@ def generate_image_file(output_stem, image_prompt_body, script_path, output_dir)
     return image_path
 
 
-def save_png_optimized(image, path, colors=None):
-    """
-    PIL 이미지를 최적화된 PNG 파일로 저장합니다.
-
-    input:
-        image: 저장할 PIL Image 객체.
-        path: PNG 파일을 저장할 경로.
-        colors: 색상 수를 줄일 때 사용할 팔레트 색상 수. 값이 없으면 원본 RGB를 유지합니다.
-    output:
-        지정한 경로에 PNG 파일을 저장합니다.
-    """
-    output = image.convert("RGB")
-    if colors is not None:
-        output = output.quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
-    output.save(path, format="PNG", optimize=True, compress_level=9)
-
-
-def optimize_image_file(path):
-    """
-    생성된 이미지 파일을 1024px 이하, 1MB 미만이 되도록 최적화합니다.
-
-    input:
-        path: 최적화할 이미지 파일 경로.
-    output:
-        같은 경로의 이미지 파일을 최적화된 PNG로 덮어씁니다.
-    """
-    with Image.open(path) as source:
-        image = source.convert("RGB")
-
-    max_side = max(image.size)
-    if max_side > TARGET_IMAGE_MAX_SIDE:
-        scale = TARGET_IMAGE_MAX_SIDE / max_side
-        resized_size = (
-            max(1, round(image.width * scale)),
-            max(1, round(image.height * scale)),
-        )
-        image = image.resize(resized_size, Image.Resampling.LANCZOS)
-
-    save_png_optimized(image, path)
-    if path.stat().st_size < MAX_IMAGE_BYTES:
-        return
-
-    for colors in (256, 192, 128, 96, 64, 48, 32):
-        save_png_optimized(image, path, colors=colors)
-        if path.stat().st_size < MAX_IMAGE_BYTES:
-            return
-
-    while path.stat().st_size >= MAX_IMAGE_BYTES and max(image.size) > 640:
-        resized_size = (
-            max(1, round(image.width * 0.9)),
-            max(1, round(image.height * 0.9)),
-        )
-        image = image.resize(resized_size, Image.Resampling.LANCZOS)
-        save_png_optimized(image, path, colors=64)
-
-
 def main(argv=None):
     """
     CLI 진입점으로 전체 스크립트/이미지 생성 흐름을 실행합니다.
@@ -457,60 +533,75 @@ def main(argv=None):
         load_dotenv(root_dir / ".env")
         template = resolve_template(root_dir, args.template)
         output_dir = resolve_output_dir(root_dir, args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        db_config = None
+        db_config = mysql_connect_kwargs()
+        target_row = None
+        keyword = get_direct_keyword(args)
+
+        if keyword:
+            target_row = load_or_insert_direct_keyword_row(args, db_config, keyword)
+        else:
+            target_row = load_target_content_row(args, db_config)
+            keyword = target_row["keyword"]
+            print_target_row_status(target_row)
+
+        output_stem = choose_output_stem(
+            output_dir=output_dir,
+            base_stem=build_keyword_stem(keyword),
+            mode=args.mode,
+        )
+
         script_path = None
-        keyword = None
-        output_stem = None
+        db_content_set = bool(target_row and has_field_value(target_row.get("content")))
+        db_image_paths_set = bool(target_row and has_image_paths_value(target_row.get("image_paths")))
 
         if args.mode in {"all", "script"}:
-            db_config = mysql_connect_kwargs()
-            keyword = resolve_keyword(args, db_config)
-            if not keyword_exists(db_config, keyword):
-                print(f"warning: keyword not found in n8n_publish_content: {keyword}", file=sys.stderr)
+            if db_content_set:
+                script_path = write_existing_script_file(
+                    output_stem,
+                    output_dir,
+                    str(target_row.get("content")),
+                )
+                print(f"script: {script_path} (from_db_content)")
+                print("db_content_updated: skipped (already set)")
+            else:
+                script_prompt_body = load_prompt(template.script_prompt)
+                script_path = generate_script_file(
+                    keyword=keyword,
+                    output_stem=output_stem,
+                    script_prompt_body=script_prompt_body,
+                    output_dir=output_dir,
+                )
+                print(f"script: {script_path}")
 
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_stem = choose_output_stem(
-                output_dir=output_dir,
-                base_stem=build_keyword_stem(keyword),
-                mode=args.mode,
-            )
-            script_prompt_body = load_prompt(template.script_prompt)
-            script_path = generate_script_file(
-                keyword=keyword,
-                output_stem=output_stem,
-                script_prompt_body=script_prompt_body,
-                output_dir=output_dir,
-            )
-            print(f"script: {script_path}")
-
-            updated_rows = update_generated_script_content(
-                db_config=db_config,
-                keyword=keyword,
-                script_path=script_path,
-            )
-            print(f"db_content_updated: {updated_rows}")
+                updated_rows = update_generated_script_content(
+                    db_config=db_config,
+                    script_path=script_path,
+                    target_row=target_row,
+                )
+                print(f"db_content_updated: {updated_rows}")
 
         if args.mode in {"all", "image"}:
+            if db_image_paths_set:
+                print(f"image: skipped (already set: {target_row.get('image_paths')})")
+                print("db_image_paths_updated: skipped (already set)")
+                return 0
+
             if args.mode == "image":
-                if not args.script_file:
-                    raise ValueError("--mode image requires --script-file.")
-                script_path = resolve_script_file(root_dir, args.script_file)
-                keyword = args.keyword.strip() if args.keyword and args.keyword.strip() else None
-                stem_source = keyword or script_path.stem
-                if stem_source.endswith("_script"):
-                    stem_source = stem_source[: -len("_script")]
-                output_dir.mkdir(parents=True, exist_ok=True)
-                output_stem = choose_output_stem(
-                    output_dir=output_dir,
-                    base_stem=build_keyword_stem(stem_source),
-                    mode=args.mode,
-                )
+                if args.script_file:
+                    script_path = resolve_script_file(root_dir, args.script_file)
+                elif db_content_set:
+                    script_path = write_existing_script_file(
+                        output_stem,
+                        output_dir,
+                        str(target_row.get("content")),
+                    )
+                    print(f"script: {script_path} (from_db_content)")
+                else:
+                    raise ValueError("--mode image requires --script-file or existing DB content.")
             elif script_path is None:
                 raise ValueError("Script generation did not produce a script file.")
-
-            if output_stem is None:
-                raise ValueError("Output file name stem was not resolved.")
 
             image_prompt_body = load_prompt(template.image_prompt)
             image_path = generate_image_file(
@@ -521,17 +612,12 @@ def main(argv=None):
             )
             print(f"image: {image_path}")
 
-            if keyword:
-                if db_config is None:
-                    db_config = mysql_connect_kwargs()
-                updated_rows = update_generated_image_path(
-                    db_config=db_config,
-                    keyword=keyword,
-                    image_path=image_path,
-                )
-                print(f"db_image_paths_updated: {updated_rows}")
-            else:
-                print("db_image_paths_updated: skipped (no keyword)")
+            updated_rows = update_generated_image_path(
+                db_config=db_config,
+                image_path=image_path,
+                target_row=target_row,
+            )
+            print(f"db_image_paths_updated: {updated_rows}")
 
         return 0
     except (FileNotFoundError, ValueError, RuntimeError, pymysql.MySQLError) as exc:

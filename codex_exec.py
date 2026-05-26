@@ -144,6 +144,10 @@ def build_image_prompt(prompt_body, script_text, output_name):
 </OUTPUT_FILE>
 
 Generate exactly one raster image from GENERATED_SCRIPT by following IMAGE_TEMPLATE.
+Use the built-in image generation tool only.
+Do not create or execute local code to draw the image.
+Do not use SVG, HTML, canvas, Pillow, matplotlib, charts, screenshots, vector primitives, or SVG-to-PNG conversion.
+If the built-in image generation tool is unavailable, fail without creating OUTPUT_FILE.
 Write the image to OUTPUT_FILE in the current directory.
 Prefer a native output size whose longest side is 1024px or smaller.
 Do not modify any other files.

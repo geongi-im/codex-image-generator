@@ -36,6 +36,16 @@
 - 한국어 텍스트 선명
 - 로고/워터마크 금지 (단, @mq_way 예외)
 
+[Codex 이미지 생성 실행 규칙]
+- Codex의 imagegen 스킬 기본 built-in 이미지 생성 모드를 사용한다.
+- imagegen CLI/API fallback 경로를 사용하지 않는다.
+- `OPENAI_API_KEY`를 요구하지 않는다.
+- 로컬 코드, SVG, HTML, canvas, Pillow, matplotlib, 차트 라이브러리, 스크린샷, 벡터 primitive, SVG-to-PNG 변환으로 이미지를 직접 그리지 않는다.
+- placeholder, wireframe, diagram, converted SVG, code-drawn illustration을 만들지 않는다.
+- 최종 결과물은 built-in image generation tool로 생성된 native raster image여야 한다.
+- 최종 파일명은 실행 프롬프트에 제공되는 `OUTPUT_FILE` 값을 그대로 사용한다.
+- built-in image generation tool을 사용할 수 없으면 대체 방식으로 파일을 만들지 말고 실패한다.
+
 [레이아웃 규칙]
 1) 상단: 제목 (2줄)
 2) 그 아래: 질문 영역

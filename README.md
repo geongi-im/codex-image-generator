@@ -76,6 +76,34 @@ python main.py --mode image --script-file output\sample_script.txt
 python main.py --output-dir output
 ```
 
+`3s_quiz` 템플릿으로 전체 생성합니다.
+
+```powershell
+python main.py --template 3s_quiz
+```
+
+자주 쓰는 조합 명령입니다.
+
+```powershell
+# 특정 날짜와 키워드로 전체 생성
+python main.py --date 2026-05-24 --keyword "APEC"
+
+# 특정 템플릿, 날짜, 키워드로 전체 생성
+python main.py --template 3s_quiz --date 2026-05-24 --keyword "APEC"
+
+# 특정 템플릿과 출력 폴더를 지정해 스크립트만 생성
+python main.py --mode script --template 3s_quiz --keyword "APEC" --output-dir output\quiz
+
+# 기존 스크립트 파일로 이미지만 생성하고 출력 폴더 지정
+python main.py --mode image --script-file output\sample_script.txt --output-dir output\image
+
+# DB에 기존 content가 있는 row를 기준으로 이미지만 생성
+python main.py --mode image --date 2026-05-24 --keyword "APEC"
+
+# 특정 템플릿, 날짜, 키워드, 기존 스크립트 파일로 이미지만 생성
+python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC" --script-file output\sample_script.txt
+```
+
 ## CLI 옵션
 
 ```text

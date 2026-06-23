@@ -96,7 +96,10 @@ TEMPLATE_CATEGORIES = {
 }
 
 MAX_CONTENT_CHARS = 500
-CONTENT_COPY_PATH_ENV = "CONTENT_COPY_PATH"
+CONTENT_COPY_PATH_ENVS = {
+    "explain_child": "CONTENT_COPY_PATH_EXPLAIN_CHILD",
+    "3s_quiz": "CONTENT_COPY_PATH_3S_QUIZ",
+}
 
 
 def parse_args(argv):
@@ -473,19 +476,20 @@ def update_generated_image_path(db_config, image_path, target_row):
     return update_image_paths_by_idx(db_config, target_row["idx"], image_paths)
 
 
-def resolve_content_copy_dir():
-    copy_path_text = os.environ.get(CONTENT_COPY_PATH_ENV, "").strip()
+def resolve_content_copy_dir(template_key):
+    copy_path_env = CONTENT_COPY_PATH_ENVS[template_key]
+    copy_path_text = os.environ.get(copy_path_env, "").strip()
     if not copy_path_text:
         return None
 
     copy_dir = Path(copy_path_text)
     if not copy_dir.is_absolute():
-        raise ValueError(f"{CONTENT_COPY_PATH_ENV} must be an absolute path: {copy_path_text}")
+        raise ValueError(f"{copy_path_env} must be an absolute path: {copy_path_text}")
 
     try:
         copy_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise RuntimeError(f"Failed to prepare {CONTENT_COPY_PATH_ENV}: {copy_dir}") from exc
+        raise RuntimeError(f"Failed to prepare {copy_path_env}: {copy_dir}") from exc
 
     return copy_dir
 
@@ -642,7 +646,7 @@ def main(argv=None):
             elif script_path is None:
                 raise ValueError("Script generation did not produce a script file.")
 
-            content_copy_dir = resolve_content_copy_dir()
+            content_copy_dir = resolve_content_copy_dir(args.template)
             image_prompt_body = load_prompt(template.image_prompt)
             image_path = generate_image_file(
                 output_stem=output_stem,

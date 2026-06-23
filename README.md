@@ -36,13 +36,15 @@ MYSQL_USER=
 MYSQL_PASSWORD=
 MYSQL_DATABASE=
 MYSQL_CHARSET=utf8mb4
-CONTENT_COPY_PATH=
+CONTENT_COPY_PATH_EXPLAIN_CHILD=
+CONTENT_COPY_PATH_3S_QUIZ=
 ```
 
-이미지 생성 결과를 다른 폴더에도 복사하려면 `CONTENT_COPY_PATH`에 시스템 절대경로를 입력합니다. 값이 비어 있으면 복사하지 않습니다.
+이미지 생성 결과를 템플릿별 폴더에도 복사하려면 템플릿에 맞는 환경변수에 시스템 절대경로를 입력합니다. 값이 비어 있으면 해당 템플릿 결과는 복사하지 않습니다.
 
 ```env
-CONTENT_COPY_PATH=C:\absolute\copy\path
+CONTENT_COPY_PATH_EXPLAIN_CHILD=C:\absolute\copy\explain_child
+CONTENT_COPY_PATH_3S_QUIZ=C:\absolute\copy\3s_quiz
 ```
 
 ## 사용법
@@ -168,7 +170,7 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC
 - 스크립트: `{timestamp}_{keyword}_script.txt`
 - 이미지: `{timestamp}_{keyword}.png`
 
-`CONTENT_COPY_PATH` 환경변수가 설정되어 있으면 이미지 생성과 최적화가 끝난 뒤 같은 파일명을 해당 절대경로 폴더로 복사합니다. DB에는 기존처럼 생성된 이미지 파일명만 저장합니다.
+`CONTENT_COPY_PATH_EXPLAIN_CHILD` 또는 `CONTENT_COPY_PATH_3S_QUIZ` 환경변수가 설정되어 있으면 이미지 생성과 최적화가 끝난 뒤 현재 템플릿에 맞는 절대경로 폴더로 같은 파일명을 복사합니다. DB에는 기존처럼 생성된 이미지 파일명만 저장합니다.
 
 이미 존재하는 파일과 충돌하면 뒤에 번호가 붙습니다.
 

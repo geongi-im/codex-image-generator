@@ -1,5 +1,7 @@
 import argparse
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -45,6 +47,7 @@ SELECT
 {PUBLISH_CONTENT_SELECT_COLUMNS}
 FROM n8n_publish_content
 WHERE target_date = %(target_date)s
+  AND category = %(category)s
   AND keyword IS NOT NULL
   AND TRIM(keyword) <> ''
 ORDER BY idx DESC
@@ -93,6 +96,7 @@ TEMPLATE_CATEGORIES = {
 }
 
 MAX_CONTENT_CHARS = 500
+CONTENT_COPY_PATH_ENV = "CONTENT_COPY_PATH"
 
 
 def parse_args(argv):
@@ -228,23 +232,27 @@ def normalize_publish_content_row(row):
     return row
 
 
-def fetch_publish_content_by_date(db_config, target_date):
+def fetch_publish_content_by_date(db_config, target_date, category):
     """
-    n8n_publish_content 테이블에서 지정 날짜의 최신 콘텐츠 row를 조회합니다.
+    n8n_publish_content 테이블에서 지정 날짜와 카테고리의 최신 콘텐츠 row를 조회합니다.
 
     input:
         db_config: MySQL 접속 설정 딕셔너리.
         target_date: 조회 기준 날짜 문자열 (YYYY-MM-DD).
+        category: 조회할 카테고리 문자열.
     output:
         idx, keyword, content, image_paths 등을 포함한 row 딕셔너리.
     """
     row = fetch_one(
         db_config,
         PUBLISH_CONTENT_BY_DATE_QUERY,
-        {"target_date": target_date},
+        {"category": category, "target_date": target_date},
     )
     if not row:
-        raise ValueError(f"No n8n_publish_content row returned for target_date={target_date}.")
+        raise ValueError(
+            "No n8n_publish_content row returned for "
+            f"target_date={target_date}, category={category}."
+        )
 
     return normalize_publish_content_row(row)
 
@@ -355,10 +363,11 @@ def load_target_content_row(args, db_config):
         args: CLI 실행 옵션 Namespace.
         db_config: MySQL 접속 설정 딕셔너리.
     output:
-        지정 날짜의 최신 n8n_publish_content row 딕셔너리.
+        지정 날짜와 템플릿 카테고리의 최신 n8n_publish_content row 딕셔너리.
     """
     target_date = resolve_target_date(args.date)
-    return fetch_publish_content_by_date(db_config, target_date)
+    category = resolve_template_category(args.template)
+    return fetch_publish_content_by_date(db_config, target_date, category)
 
 
 def load_or_insert_direct_keyword_row(args, db_config, keyword):
@@ -462,6 +471,36 @@ def update_generated_image_path(db_config, image_path, target_row):
     """
     image_paths = json.dumps([image_path.name], ensure_ascii=False)
     return update_image_paths_by_idx(db_config, target_row["idx"], image_paths)
+
+
+def resolve_content_copy_dir():
+    copy_path_text = os.environ.get(CONTENT_COPY_PATH_ENV, "").strip()
+    if not copy_path_text:
+        return None
+
+    copy_dir = Path(copy_path_text)
+    if not copy_dir.is_absolute():
+        raise ValueError(f"{CONTENT_COPY_PATH_ENV} must be an absolute path: {copy_path_text}")
+
+    try:
+        copy_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to prepare {CONTENT_COPY_PATH_ENV}: {copy_dir}") from exc
+
+    return copy_dir
+
+
+def copy_generated_image(image_path, copy_dir):
+    if copy_dir is None:
+        return None
+
+    destination = copy_dir / image_path.name
+    try:
+        shutil.copy2(image_path, destination)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to copy generated image to {destination}") from exc
+
+    return destination
 
 
 def generate_script_file(keyword, output_stem, script_prompt_body, output_dir):
@@ -603,6 +642,7 @@ def main(argv=None):
             elif script_path is None:
                 raise ValueError("Script generation did not produce a script file.")
 
+            content_copy_dir = resolve_content_copy_dir()
             image_prompt_body = load_prompt(template.image_prompt)
             image_path = generate_image_file(
                 output_stem=output_stem,
@@ -611,6 +651,10 @@ def main(argv=None):
                 output_dir=output_dir,
             )
             print(f"image: {image_path}")
+
+            copied_image_path = copy_generated_image(image_path, content_copy_dir)
+            if copied_image_path:
+                print(f"image_copied: {copied_image_path}")
 
             updated_rows = update_generated_image_path(
                 db_config=db_config,

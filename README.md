@@ -36,11 +36,18 @@ MYSQL_USER=
 MYSQL_PASSWORD=
 MYSQL_DATABASE=
 MYSQL_CHARSET=utf8mb4
+CONTENT_COPY_PATH=
+```
+
+이미지 생성 결과를 다른 폴더에도 복사하려면 `CONTENT_COPY_PATH`에 시스템 절대경로를 입력합니다. 값이 비어 있으면 복사하지 않습니다.
+
+```env
+CONTENT_COPY_PATH=C:\absolute\copy\path
 ```
 
 ## 사용법
 
-기본 실행은 오늘 날짜의 최신 키워드 row를 조회한 뒤 스크립트와 이미지를 모두 생성합니다.
+기본 실행은 오늘 날짜와 기본 템플릿(`explain_child`) 카테고리에 맞는 최신 키워드 row를 조회한 뒤 스크립트와 이미지를 모두 생성합니다.
 
 ```powershell
 python main.py
@@ -52,7 +59,7 @@ python main.py
 python main.py --keyword "APEC"
 ```
 
-특정 날짜의 키워드를 사용합니다.
+특정 날짜와 템플릿 카테고리에 맞는 키워드를 사용합니다.
 
 ```powershell
 python main.py --date 2026-05-24
@@ -82,6 +89,13 @@ python main.py --output-dir output
 python main.py --template 3s_quiz
 ```
 
+crontab처럼 키워드를 미리 알 수 없는 자동 실행에서는 템플릿만 지정해 이미지를 생성합니다. 날짜를 생략하면 실행일 기준 오늘 날짜를 사용합니다.
+
+```powershell
+python main.py --mode image --template explain_child
+python main.py --mode image --template 3s_quiz
+```
+
 자주 쓰는 조합 명령입니다.
 
 ```powershell
@@ -100,6 +114,10 @@ python main.py --mode image --script-file output\sample_script.txt --output-dir 
 # DB에 기존 content가 있는 row를 기준으로 이미지만 생성
 python main.py --mode image --date 2026-05-24 --keyword "APEC"
 
+# 키워드를 지정하지 않고 날짜와 템플릿 카테고리로 이미지만 생성
+python main.py --mode image --template explain_child --date 2026-05-24
+python main.py --mode image --template 3s_quiz --date 2026-05-24
+
 # 특정 템플릿, 날짜, 키워드, 기존 스크립트 파일로 이미지만 생성
 python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC" --script-file output\sample_script.txt
 ```
@@ -110,7 +128,7 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC
 --template      사용할 프롬프트 템플릿입니다. 기본값: explain_child
 --mode          실행 범위입니다. all, script, image 중 선택합니다. 기본값: all
 --date          조회 또는 생성 기준 날짜입니다. YYYY-MM-DD 형식이며 기본값은 오늘입니다.
---keyword       직접 사용할 키워드입니다.
+--keyword       직접 사용할 키워드입니다. 생략하면 --date와 --template 카테고리 기준 최신 row를 사용합니다.
 --script-file   image 모드에서 사용할 기존 스크립트 파일입니다.
 --output-dir    생성 파일을 저장할 폴더입니다. 기본값: output
 ```
@@ -149,6 +167,8 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC
 
 - 스크립트: `{timestamp}_{keyword}_script.txt`
 - 이미지: `{timestamp}_{keyword}.png`
+
+`CONTENT_COPY_PATH` 환경변수가 설정되어 있으면 이미지 생성과 최적화가 끝난 뒤 같은 파일명을 해당 절대경로 폴더로 복사합니다. DB에는 기존처럼 생성된 이미지 파일명만 저장합니다.
 
 이미 존재하는 파일과 충돌하면 뒤에 번호가 붙습니다.
 

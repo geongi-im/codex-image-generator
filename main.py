@@ -470,37 +470,6 @@ def load_target_content_row(args, db_config):
     return fetch_publish_content_by_date(db_config, target_date, category)
 
 
-def load_news_target_content_row(args, db_config):
-    """
-    뉴스 기반 스크립트 생성에 사용할 n8n_publish_content row를 조회합니다.
-
-    input:
-        args: CLI 실행 옵션 Namespace.
-        db_config: MySQL 접속 설정 딕셔너리.
-    output:
-        comment에 뉴스 URL이 포함된 n8n_publish_content row 딕셔너리.
-    """
-    target_date = resolve_target_date(args.date)
-    category = resolve_template_category(args.template)
-    keyword = get_direct_keyword(args)
-
-    if keyword:
-        target_row = fetch_publish_content_by_keyword_date(
-            db_config,
-            keyword,
-            target_date,
-            category,
-        )
-        if not target_row:
-            raise ValueError(
-                "No n8n_publish_content row returned for "
-                f"target_date={target_date}, category={category}, keyword={keyword}."
-            )
-        return target_row
-
-    return fetch_publish_content_by_date(db_config, target_date, category)
-
-
 def load_or_insert_direct_keyword_row(args, db_config, keyword):
     """
     직접 입력된 키워드와 날짜에 해당하는 row를 조회하고, 없으면 새로 생성합니다.
@@ -733,16 +702,9 @@ def main(argv=None):
 
         db_config = mysql_connect_kwargs()
         target_row = None
-        news_quiz_row = None
         keyword = get_direct_keyword(args)
 
-        if template.uses_news_context:
-            target_row = load_news_target_content_row(args, db_config)
-            print_target_row_status(target_row)
-            news_url = extract_news_source_url(target_row.get("comment"))
-            news_quiz_row = fetch_news_quiz_by_source_url(db_config, news_url)
-            keyword = resolve_news_script_keyword(target_row["keyword"], news_quiz_row)
-        elif keyword:
+        if keyword:
             target_row = load_or_insert_direct_keyword_row(args, db_config, keyword)
         else:
             target_row = load_target_content_row(args, db_config)
@@ -756,16 +718,8 @@ def main(argv=None):
         )
 
         script_path = None
-        db_content_set = bool(
-            target_row
-            and not template.uses_news_context
-            and has_field_value(target_row.get("content"))
-        )
-        db_image_paths_set = bool(
-            target_row
-            and not template.uses_news_context
-            and has_image_paths_value(target_row.get("image_paths"))
-        )
+        db_content_set = bool(target_row and has_field_value(target_row.get("content")))
+        db_image_paths_set = bool(target_row and has_image_paths_value(target_row.get("image_paths")))
 
         if args.mode in {"all", "script"}:
             if db_content_set:
@@ -777,9 +731,11 @@ def main(argv=None):
                 print(f"script: {script_path} (from_db_content)")
                 print("db_content_updated: skipped (already set)")
             elif template.uses_news_context:
+                news_url = extract_news_source_url(target_row.get("comment"))
+                news_quiz_row = fetch_news_quiz_by_source_url(db_config, news_url)
                 script_prompt_body = load_prompt(template.script_prompt)
                 script_path = generate_news_script_file(
-                    keyword=keyword,
+                    keyword=resolve_news_script_keyword(keyword, news_quiz_row),
                     news_context=build_news_context_text(news_quiz_row),
                     output_stem=output_stem,
                     script_prompt_body=script_prompt_body,
@@ -787,7 +743,12 @@ def main(argv=None):
                 )
                 validate_content_length(script_path.read_text(encoding="utf-8").strip())
                 print(f"script: {script_path}")
-                print("db_content_updated: skipped (news template)")
+                updated_rows = update_generated_script_content(
+                    db_config=db_config,
+                    script_path=script_path,
+                    target_row=target_row,
+                )
+                print(f"db_content_updated: {updated_rows}")
             else:
                 script_prompt_body = load_prompt(template.script_prompt)
                 script_path = generate_script_file(
@@ -839,10 +800,6 @@ def main(argv=None):
             copied_image_path = copy_generated_image(image_path, content_copy_dir)
             if copied_image_path:
                 print(f"image_copied: {copied_image_path}")
-
-            if template.uses_news_context:
-                print("db_image_paths_updated: skipped (news template)")
-                return 0
 
             updated_rows = update_generated_image_path(
                 db_config=db_config,

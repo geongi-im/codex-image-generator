@@ -164,7 +164,7 @@ python main.py --mode all --template news_3s_quiz --date 2026-06-26
   - `prompt/SCRIPT_NEWS_3S_QUIZ.md`
   - `prompt/IMAGE_NEWS_3S_QUIZ.md`
 
-`news_explain_child`는 기존 `자녀에게설명하기` 카테고리 row를 조회하고, `news_3s_quiz`는 기존 `3초퀴즈` 카테고리 row를 조회합니다. 두 템플릿 모두 뉴스 맥락을 반영한 새 결과 파일을 만들지만, 기존 DB의 `content`와 `image_paths`는 덮어쓰지 않습니다.
+`news_explain_child`는 기존 `자녀에게설명하기` 카테고리 row를 조회하고, `news_3s_quiz`는 기존 `3초퀴즈` 카테고리 row를 조회합니다. 두 템플릿 모두 기존 템플릿과 같은 생성 흐름을 사용하므로 `--keyword`로 지정한 row가 없으면 신규 row를 만들고, 생성된 스크립트와 이미지 파일명은 각각 `content`, `image_paths`에 저장합니다.
 
 ## DB 동작
 
@@ -189,7 +189,9 @@ python main.py --mode all --template news_3s_quiz --date 2026-06-26
 1. `n8n_publish_content.comment`에서 뉴스 URL을 추출합니다.
 2. 추출한 URL과 `mq_news_quiz.mq_source_url`이 일치하는 row를 조회합니다.
 3. `mq_title`, `mq_keyword`, `mq_keyword_description`, `mq_selection_reason`을 프롬프트 컨텍스트로 전달합니다.
-4. 생성 결과는 파일로만 남기고 `n8n_publish_content.content`, `image_paths`는 업데이트하지 않습니다.
+4. 생성한 스크립트는 `n8n_publish_content.content`에 저장하고, 생성한 이미지 파일명은 `image_paths`에 저장합니다.
+
+뉴스 기반 템플릿은 `comment`에 뉴스 URL이 있어야 스크립트를 새로 생성할 수 있습니다. `--keyword`로 새 row가 삽입되었지만 `comment`가 비어 있으면 뉴스 컨텍스트를 찾을 수 없어 생성 단계에서 실패합니다.
 
 ## 출력
 

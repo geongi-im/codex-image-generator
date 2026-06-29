@@ -11,18 +11,20 @@ CODEX_SANDBOX = "danger-full-access"
 class TemplateSpec:
     """프롬프트 템플릿 경로 묶음입니다."""
 
-    def __init__(self, script_prompt, image_prompt):
+    def __init__(self, script_prompt, image_prompt, uses_news_context=False):
         """
         스크립트 프롬프트와 이미지 프롬프트 경로를 보관합니다.
 
         input:
             script_prompt: 스크립트 생성 프롬프트 파일 경로.
             image_prompt: 이미지 생성 프롬프트 파일 경로.
+            uses_news_context: 스크립트 생성 시 뉴스 컨텍스트를 함께 사용할지 여부.
         output:
             TemplateSpec 인스턴스의 내부 상태를 초기화합니다.
         """
         self.script_prompt = script_prompt
         self.image_prompt = image_prompt
+        self.uses_news_context = uses_news_context
 
 
 TEMPLATES = {
@@ -33,6 +35,16 @@ TEMPLATES = {
     "3s_quiz": TemplateSpec(
         script_prompt=Path("prompt") / "SCRIPT_3S_QUIZ.md",
         image_prompt=Path("prompt") / "IMAGE_3S_QUIZ.md",
+    ),
+    "news_explain_child": TemplateSpec(
+        script_prompt=Path("prompt") / "SCRIPT_NEWS_EXPLAIN_CHILD.md",
+        image_prompt=Path("prompt") / "IMAGE_NEWS_EXPLAIN_CHILD.md",
+        uses_news_context=True,
+    ),
+    "news_3s_quiz": TemplateSpec(
+        script_prompt=Path("prompt") / "SCRIPT_NEWS_3S_QUIZ.md",
+        image_prompt=Path("prompt") / "IMAGE_NEWS_3S_QUIZ.md",
+        uses_news_context=True,
     ),
 }
 
@@ -68,6 +80,7 @@ def resolve_template(root_dir, template_key):
     return TemplateSpec(
         script_prompt=root_dir / template.script_prompt,
         image_prompt=root_dir / template.image_prompt,
+        uses_news_context=template.uses_news_context,
     )
 
 
@@ -111,6 +124,45 @@ def build_script_prompt(prompt_body, keyword, output_name):
 </OUTPUT_FILE>
 
 Generate the final script from KEYWORD by following SCRIPT_TEMPLATE.
+The entire generated script must be fewer than 500 characters total, including spaces and line breaks.
+This 500-character limit is mandatory even if SCRIPT_TEMPLATE describes per-post limits.
+Write only the generated script text to OUTPUT_FILE in the current directory.
+Do not modify any other files.
+"""
+
+
+def build_news_script_prompt(prompt_body, keyword, news_context, output_name):
+    """
+    뉴스 컨텍스트를 포함한 스크립트 생성 최종 프롬프트를 만듭니다.
+
+    input:
+        prompt_body: 뉴스 기반 스크립트 생성 규칙을 담은 프롬프트 본문.
+        keyword: 스크립트 생성에 사용할 키워드.
+        news_context: 기사 제목, 뉴스 키워드 설명, 선별 이유 등을 담은 문자열.
+        output_name: 생성된 스크립트를 저장할 파일명.
+    output:
+        codex exec에 전달할 최종 프롬프트 문자열.
+    """
+    return f"""Use SCRIPT_TEMPLATE as the only writing rules document.
+
+<SCRIPT_TEMPLATE>
+{prompt_body}
+</SCRIPT_TEMPLATE>
+
+<KEYWORD>
+{keyword}
+</KEYWORD>
+
+<NEWS_CONTEXT>
+{news_context}
+</NEWS_CONTEXT>
+
+<OUTPUT_FILE>
+{output_name}
+</OUTPUT_FILE>
+
+Generate the final script from KEYWORD and NEWS_CONTEXT by following SCRIPT_TEMPLATE.
+Do not browse the web or infer article facts that are not present in NEWS_CONTEXT.
 The entire generated script must be fewer than 500 characters total, including spaces and line breaks.
 This 500-character limit is mandatory even if SCRIPT_TEMPLATE describes per-post limits.
 Write only the generated script text to OUTPUT_FILE in the current directory.

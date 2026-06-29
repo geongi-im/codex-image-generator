@@ -9,6 +9,7 @@ MySQL에 저장된 키워드를 기준으로 짧은 스크립트와 이미지를
 - 선택한 프롬프트 템플릿으로 스크립트 생성
 - 생성된 스크립트 또는 기존 DB content로 이미지 생성
 - 생성된 content와 image_paths를 MySQL에 업데이트
+- 뉴스 기반 템플릿(`news_explain_child`, `news_3s_quiz`)은 `comment`의 뉴스 URL과 `mq_news_quiz` 정보를 함께 사용해 스크립트와 이미지를 생성
 - 생성 이미지를 1024px 이하, 1MB 미만을 목표로 최적화
 
 ## 요구사항
@@ -91,6 +92,13 @@ python main.py --output-dir output
 python main.py --template 3s_quiz
 ```
 
+뉴스 기반 템플릿은 `n8n_publish_content.comment`의 뉴스 URL을 기준으로 `mq_news_quiz.mq_source_url`이 일치하는 row를 조회한 뒤, 기사 제목/뉴스 키워드/키워드 설명/선별 이유를 반영해 생성합니다.
+
+```powershell
+python main.py --template news_explain_child --date 2026-06-26
+python main.py --template news_3s_quiz --date 2026-06-26
+```
+
 crontab처럼 키워드를 미리 알 수 없는 자동 실행에서는 템플릿만 지정해 이미지를 생성합니다. 날짜를 생략하면 실행일 기준 오늘 날짜를 사용합니다.
 
 ```powershell
@@ -122,6 +130,10 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24
 
 # 특정 템플릿, 날짜, 키워드, 기존 스크립트 파일로 이미지만 생성
 python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC" --script-file output\sample_script.txt
+
+# 뉴스 기반 템플릿으로 스크립트와 이미지 생성
+python main.py --mode all --template news_explain_child --date 2026-06-26
+python main.py --mode all --template news_3s_quiz --date 2026-06-26
 ```
 
 ## CLI 옵션
@@ -137,7 +149,7 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC
 
 ## 템플릿
 
-현재 지원하는 템플릿은 두 가지입니다.
+현재 지원하는 템플릿은 네 가지입니다.
 
 - `explain_child`
   - `prompt/SCRIPT_EXPLAN_CHILD.md`
@@ -145,6 +157,14 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC
 - `3s_quiz`
   - `prompt/SCRIPT_3S_QUIZ.md`
   - `prompt/IMAGE_3S_QUIZ.md`
+- `news_explain_child`
+  - `prompt/SCRIPT_NEWS_EXPLAIN_CHILD.md`
+  - `prompt/IMAGE_NEWS_EXPLAIN_CHILD.md`
+- `news_3s_quiz`
+  - `prompt/SCRIPT_NEWS_3S_QUIZ.md`
+  - `prompt/IMAGE_NEWS_3S_QUIZ.md`
+
+`news_explain_child`는 기존 `자녀에게설명하기` 카테고리 row를 조회하고, `news_3s_quiz`는 기존 `3초퀴즈` 카테고리 row를 조회합니다. 두 템플릿 모두 뉴스 맥락을 반영한 새 결과 파일을 만들지만, 기존 DB의 `content`와 `image_paths`는 덮어쓰지 않습니다.
 
 ## DB 동작
 
@@ -155,6 +175,7 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC
 - `keyword`
 - `content`
 - `image_paths`
+- `comment`
 - `target_date`
 - `threads_status`
 - `website_status`
@@ -162,6 +183,13 @@ python main.py --mode image --template 3s_quiz --date 2026-05-24 --keyword "APEC
 `--keyword`가 없으면 `target_date` 기준 최신 keyword row를 조회합니다. `--keyword`가 있으면 `category`, `keyword`, `target_date`가 일치하는 row를 찾고, 없으면 새 row를 생성합니다.
 
 스크립트 생성 후에는 `content` 컬럼을 업데이트합니다. 이미지 생성 후에는 생성된 파일명을 JSON 배열 문자열로 만들어 `image_paths` 컬럼에 저장합니다.
+
+뉴스 기반 템플릿은 추가로 다음 흐름을 사용합니다.
+
+1. `n8n_publish_content.comment`에서 뉴스 URL을 추출합니다.
+2. 추출한 URL과 `mq_news_quiz.mq_source_url`이 일치하는 row를 조회합니다.
+3. `mq_title`, `mq_keyword`, `mq_keyword_description`, `mq_selection_reason`을 프롬프트 컨텍스트로 전달합니다.
+4. 생성 결과는 파일로만 남기고 `n8n_publish_content.content`, `image_paths`는 업데이트하지 않습니다.
 
 ## 출력
 

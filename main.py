@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 
 from codex_exec import (
     build_image_prompt,
+    build_news_script_prompt,
     build_script_prompt,
     load_prompt,
     resolve_template,
@@ -37,6 +39,7 @@ PUBLISH_CONTENT_SELECT_COLUMNS = """
     keyword,
     content,
     image_paths,
+    comment,
     target_date,
     threads_status,
     website_status
@@ -90,15 +93,32 @@ SET image_paths = %(image_paths)s
 WHERE idx = %(idx)s
 """
 
+NEWS_QUIZ_BY_SOURCE_URL_QUERY = """
+SELECT
+    mq_source_url,
+    mq_title,
+    mq_keyword,
+    mq_keyword_description,
+    mq_selection_reason
+FROM mq_news_quiz
+WHERE mq_source_url = %(source_url)s
+LIMIT 1
+"""
+
 TEMPLATE_CATEGORIES = {
     "3s_quiz": "3초퀴즈",
     "explain_child": "자녀에게설명하기",
+    "news_3s_quiz": "3초퀴즈",
+    "news_explain_child": "자녀에게설명하기",
 }
 
 MAX_CONTENT_CHARS = 500
+NEWS_URL_PATTERN = re.compile(r"https?://\S+")
 CONTENT_COPY_PATH_ENVS = {
     "explain_child": "CONTENT_COPY_PATH_EXPLAIN_CHILD",
     "3s_quiz": "CONTENT_COPY_PATH_3S_QUIZ",
+    "news_explain_child": "CONTENT_COPY_PATH_EXPLAIN_CHILD",
+    "news_3s_quiz": "CONTENT_COPY_PATH_3S_QUIZ",
 }
 
 
@@ -300,6 +320,83 @@ def fetch_publish_content_by_idx(db_config, idx):
     return normalize_publish_content_row(row)
 
 
+def extract_news_source_url(comment):
+    """
+    n8n_publish_content.comment 값에서 뉴스 URL을 추출합니다.
+
+    input:
+        comment: URL이 포함된 comment 필드 값.
+    output:
+        mq_news_quiz.mq_source_url 조회에 사용할 뉴스 URL 문자열.
+    """
+    text = str(comment or "").strip().replace("\\/", "/")
+    match = NEWS_URL_PATTERN.search(text)
+    if match:
+        return match.group(0).rstrip(".,;:)]}'\"<>")
+
+    if text.startswith("www."):
+        trimmed = text.rstrip(".,;:)]}'\"<>")
+        return f"https://{trimmed}"
+
+    raise ValueError("No news URL found in n8n_publish_content.comment.")
+
+
+def fetch_news_quiz_by_source_url(db_config, source_url):
+    """
+    뉴스 URL과 일치하는 mq_news_quiz row를 조회합니다.
+
+    input:
+        db_config: MySQL 접속 설정 딕셔너리.
+        source_url: n8n_publish_content.comment에서 추출한 뉴스 URL.
+    output:
+        기사 제목, 뉴스 키워드, 키워드 설명, 선별 이유가 포함된 row 딕셔너리.
+    """
+    row = fetch_one(
+        db_config,
+        NEWS_QUIZ_BY_SOURCE_URL_QUERY,
+        {"source_url": source_url},
+    )
+    if not row:
+        raise ValueError(f"No mq_news_quiz row returned for mq_source_url={source_url}.")
+
+    return row
+
+
+def build_news_context_text(news_quiz_row):
+    """
+    mq_news_quiz row를 Codex 프롬프트에 전달할 짧은 컨텍스트로 변환합니다.
+
+    input:
+        news_quiz_row: mq_news_quiz에서 조회한 row 딕셔너리.
+    output:
+        구조화된 뉴스 컨텍스트 문자열.
+    """
+    fields = (
+        ("뉴스 URL", news_quiz_row.get("mq_source_url")),
+        ("뉴스기사제목", news_quiz_row.get("mq_title")),
+        ("뉴스 추출 키워드", news_quiz_row.get("mq_keyword")),
+        ("키워드 한줄 설명", news_quiz_row.get("mq_keyword_description")),
+        ("뉴스 선별 이유", news_quiz_row.get("mq_selection_reason")),
+    )
+    return "\n".join(f"{label}: {str(value or '').strip()}" for label, value in fields)
+
+
+def resolve_news_script_keyword(keyword, news_quiz_row):
+    """
+    뉴스 기반 스크립트에서 사용할 중심 키워드를 결정합니다.
+
+    input:
+        keyword: n8n_publish_content에서 조회한 키워드.
+        news_quiz_row: mq_news_quiz에서 조회한 row 딕셔너리.
+    output:
+        뉴스 추출 키워드가 있으면 그 값을, 없으면 기존 키워드를 반환합니다.
+    """
+    news_keyword = news_quiz_row.get("mq_keyword")
+    if news_keyword and str(news_keyword).strip():
+        return str(news_keyword).strip()
+    return keyword
+
+
 def insert_publish_content_keyword_date(db_config, keyword, target_date, category):
     """
     n8n_publish_content 테이블에 키워드와 날짜만 가진 신규 row를 생성합니다.
@@ -370,6 +467,37 @@ def load_target_content_row(args, db_config):
     """
     target_date = resolve_target_date(args.date)
     category = resolve_template_category(args.template)
+    return fetch_publish_content_by_date(db_config, target_date, category)
+
+
+def load_news_target_content_row(args, db_config):
+    """
+    뉴스 기반 스크립트 생성에 사용할 n8n_publish_content row를 조회합니다.
+
+    input:
+        args: CLI 실행 옵션 Namespace.
+        db_config: MySQL 접속 설정 딕셔너리.
+    output:
+        comment에 뉴스 URL이 포함된 n8n_publish_content row 딕셔너리.
+    """
+    target_date = resolve_target_date(args.date)
+    category = resolve_template_category(args.template)
+    keyword = get_direct_keyword(args)
+
+    if keyword:
+        target_row = fetch_publish_content_by_keyword_date(
+            db_config,
+            keyword,
+            target_date,
+            category,
+        )
+        if not target_row:
+            raise ValueError(
+                "No n8n_publish_content row returned for "
+                f"target_date={target_date}, category={category}, keyword={keyword}."
+            )
+        return target_row
+
     return fetch_publish_content_by_date(db_config, target_date, category)
 
 
@@ -531,6 +659,31 @@ def generate_script_file(keyword, output_stem, script_prompt_body, output_dir):
     return script_path
 
 
+def generate_news_script_file(keyword, news_context, output_stem, script_prompt_body, output_dir):
+    """
+    뉴스 컨텍스트를 포함해 Codex CLI로 스크립트 텍스트 파일을 생성합니다.
+
+    input:
+        keyword: 스크립트 생성에 사용할 키워드.
+        news_context: 기사 제목과 키워드 설명 등 뉴스 기반 컨텍스트.
+        output_stem: 생성 파일명에 사용할 stem.
+        script_prompt_body: 뉴스 기반 스크립트 생성 프롬프트 본문.
+        output_dir: 스크립트 파일을 저장할 출력 폴더 경로.
+    output:
+        생성된 스크립트 파일 Path 객체.
+    """
+    output_name = f"{output_stem}_script.txt"
+    prompt = build_news_script_prompt(script_prompt_body, keyword, news_context, output_name)
+    exit_code = run_codex_exec(prompt=prompt, output_dir=output_dir)
+    if exit_code != 0:
+        raise RuntimeError(f"codex exec failed while generating news script. exit_code={exit_code}")
+
+    script_path = output_dir / output_name
+    if not script_path.exists():
+        raise FileNotFoundError(f"Expected generated script file not found: {script_path}")
+    return script_path
+
+
 def generate_image_file(output_stem, image_prompt_body, script_path, output_dir):
     """
     Codex CLI를 실행하여 이미지 파일을 생성하고 최적화합니다.
@@ -580,9 +733,16 @@ def main(argv=None):
 
         db_config = mysql_connect_kwargs()
         target_row = None
+        news_quiz_row = None
         keyword = get_direct_keyword(args)
 
-        if keyword:
+        if template.uses_news_context:
+            target_row = load_news_target_content_row(args, db_config)
+            print_target_row_status(target_row)
+            news_url = extract_news_source_url(target_row.get("comment"))
+            news_quiz_row = fetch_news_quiz_by_source_url(db_config, news_url)
+            keyword = resolve_news_script_keyword(target_row["keyword"], news_quiz_row)
+        elif keyword:
             target_row = load_or_insert_direct_keyword_row(args, db_config, keyword)
         else:
             target_row = load_target_content_row(args, db_config)
@@ -596,8 +756,16 @@ def main(argv=None):
         )
 
         script_path = None
-        db_content_set = bool(target_row and has_field_value(target_row.get("content")))
-        db_image_paths_set = bool(target_row and has_image_paths_value(target_row.get("image_paths")))
+        db_content_set = bool(
+            target_row
+            and not template.uses_news_context
+            and has_field_value(target_row.get("content"))
+        )
+        db_image_paths_set = bool(
+            target_row
+            and not template.uses_news_context
+            and has_image_paths_value(target_row.get("image_paths"))
+        )
 
         if args.mode in {"all", "script"}:
             if db_content_set:
@@ -608,6 +776,18 @@ def main(argv=None):
                 )
                 print(f"script: {script_path} (from_db_content)")
                 print("db_content_updated: skipped (already set)")
+            elif template.uses_news_context:
+                script_prompt_body = load_prompt(template.script_prompt)
+                script_path = generate_news_script_file(
+                    keyword=keyword,
+                    news_context=build_news_context_text(news_quiz_row),
+                    output_stem=output_stem,
+                    script_prompt_body=script_prompt_body,
+                    output_dir=output_dir,
+                )
+                validate_content_length(script_path.read_text(encoding="utf-8").strip())
+                print(f"script: {script_path}")
+                print("db_content_updated: skipped (news template)")
             else:
                 script_prompt_body = load_prompt(template.script_prompt)
                 script_path = generate_script_file(
@@ -659,6 +839,10 @@ def main(argv=None):
             copied_image_path = copy_generated_image(image_path, content_copy_dir)
             if copied_image_path:
                 print(f"image_copied: {copied_image_path}")
+
+            if template.uses_news_context:
+                print("db_image_paths_updated: skipped (news template)")
+                return 0
 
             updated_rows = update_generated_image_path(
                 db_config=db_config,

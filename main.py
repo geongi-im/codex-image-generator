@@ -23,6 +23,7 @@ from db_connector import (
     fetch_one,
     mysql_connect_kwargs,
 )
+from image_providers import IMAGE_PROVIDER_ENV, resolve_image_provider
 from utils.common_util import (
     build_keyword_stem,
     choose_output_stem,
@@ -653,15 +654,17 @@ def generate_news_script_file(keyword, news_context, output_stem, script_prompt_
     return script_path
 
 
-def generate_image_file(output_stem, image_prompt_body, script_path, output_dir):
+def generate_image_file(output_stem, image_prompt_body, script_path, output_dir, image_provider, aspect_ratio=None):
     """
-    Codex CLI를 실행하여 이미지 파일을 생성하고 최적화합니다.
+    선택된 provider로 이미지 파일을 생성하고 최적화합니다.
 
     input:
         output_stem: 생성 파일명에 사용할 stem.
         image_prompt_body: 이미지 생성 프롬프트 본문.
         script_path: 이미지 생성 기준이 되는 스크립트 파일 경로.
         output_dir: 이미지 파일을 저장할 출력 폴더 경로.
+        image_provider: resolve_image_provider가 반환한 이미지 생성 함수.
+        aspect_ratio: 이미지 가로세로 비율 문자열. 비율 지정이 가능한 provider만 사용합니다.
     output:
         생성된 이미지 파일 Path 객체.
     """
@@ -671,9 +674,7 @@ def generate_image_file(output_stem, image_prompt_body, script_path, output_dir)
 
     output_name = f"{output_stem}.png"
     prompt = build_image_prompt(image_prompt_body, script_text, output_name)
-    exit_code = run_codex_exec(prompt=prompt, output_dir=output_dir)
-    if exit_code != 0:
-        raise RuntimeError(f"codex exec failed while generating image. exit_code={exit_code}")
+    image_provider(prompt=prompt, output_dir=output_dir, output_name=output_name, aspect_ratio=aspect_ratio)
 
     image_path = output_dir / output_name
     if not image_path.exists():
@@ -697,6 +698,9 @@ def main(argv=None):
     try:
         load_dotenv(root_dir / ".env")
         template = resolve_template(root_dir, args.template)
+        image_provider = None
+        if args.mode in {"all", "image"}:
+            image_provider = resolve_image_provider(os.environ.get(IMAGE_PROVIDER_ENV))
         output_dir = resolve_output_dir(root_dir, args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -794,6 +798,8 @@ def main(argv=None):
                 image_prompt_body=image_prompt_body,
                 script_path=script_path,
                 output_dir=output_dir,
+                image_provider=image_provider,
+                aspect_ratio=template.aspect_ratio,
             )
             print(f"image: {image_path}")
 

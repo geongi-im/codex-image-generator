@@ -16,7 +16,8 @@ MySQL에 저장된 키워드를 기준으로 짧은 스크립트와 이미지를
 
 - Python 3.10 이상 권장
 - MySQL 접속 정보와 `n8n_publish_content` 테이블
-- Codex CLI 실행 환경
+- Codex CLI 실행 환경 (스크립트 생성, 기본 이미지 생성)
+- 이미지를 Antigravity CLI로 생성하려면 `agy` 설치와 로그인 (`IMAGE_PROVIDER=agy`)
 - Python 패키지: `requirements.txt`
 
 ## 설치
@@ -39,6 +40,9 @@ MYSQL_DATABASE=
 MYSQL_CHARSET=utf8mb4
 CONTENT_COPY_PATH_EXPLAIN_CHILD=
 CONTENT_COPY_PATH_3S_QUIZ=
+IMAGE_PROVIDER=codex
+GEMINI_API_KEY=
+GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
 ```
 
 이미지 생성 결과를 템플릿별 폴더에도 복사하려면 템플릿에 맞는 환경변수에 시스템 절대경로를 입력합니다. 값이 비어 있으면 해당 템플릿 결과는 복사하지 않습니다.
@@ -192,6 +196,40 @@ python main.py --mode all --template news_3s_quiz --date 2026-06-26
 4. 생성한 스크립트는 `n8n_publish_content.content`에 저장하고, 생성한 이미지 파일명은 `image_paths`에 저장합니다.
 
 뉴스 기반 템플릿은 `comment`에 뉴스 URL이 있어야 스크립트를 새로 생성할 수 있습니다. `--keyword`로 새 row가 삽입되었지만 `comment`가 비어 있으면 뉴스 컨텍스트를 찾을 수 없어 생성 단계에서 실패합니다.
+
+## 이미지 생성 provider
+
+이미지를 어떤 도구로 생성할지 `.env`의 `IMAGE_PROVIDER`로 고릅니다. 값이 비어 있으면 `codex`를 사용합니다. 스크립트 텍스트 생성은 항상 Codex CLI를 사용하며 이 설정과 무관합니다.
+
+| 값 | 동작 |
+|---|---|
+| `codex` | `codex exec`의 내장 이미지 생성 도구를 사용합니다. 기본값입니다. |
+| `agy` | Antigravity CLI(`agy -p`)로 생성합니다. |
+| `gemini_api` | Gemini API를 직접 호출해 생성합니다. `GEMINI_API_KEY`가 필요합니다. |
+
+`agy`를 쓰려면 먼저 `agy`를 설치하고, 터미널에서 `agy`를 한 번 실행해 Google 계정으로 로그인해 둡니다. 설치 직후 열려 있던 터미널은 PATH가 갱신되지 않을 수 있는데, PATH에 없으면 `%LOCALAPPDATA%\agy\bin\agy.exe`를 자동으로 찾습니다.
+
+`agy` 사용 시 주의할 점입니다.
+
+- `agy`는 이미지를 `~/.gemini/antigravity-cli/brain/<세션>/` 아래에 JPEG로 저장합니다. 실행 후 새로 생긴 이미지 중 가장 최근 파일을 출력 폴더로 복사하고, 기존과 같이 PNG로 최적화합니다. 이 세션 폴더는 자동으로 지워지지 않습니다.
+- 이미지 생성 모델의 사용량 한도(쿼터)가 소진되면 이미지가 만들어지지 않고 실패합니다. 이때 한도 초과 메시지는 `agy`의 세션 로그에만 남을 수 있습니다.
+- 프롬프트가 에이전트를 거치므로 스크립트 대사가 일부 바뀌어 그려질 수 있습니다.
+
+`gemini_api` 사용 시 주의할 점입니다.
+
+- 모델은 `GEMINI_IMAGE_MODEL`로 바꿀 수 있습니다. 비워 두면 `gemini-3.1-flash-image`를 사용합니다. 더 저렴한 `gemini-3.1-flash-lite-image`도 쓸 수 있지만 1K 해상도만 지원합니다.
+- 템플릿별 가로세로 비율(`explain_child`, `news_explain_child`는 16:9, `3s_quiz`, `news_3s_quiz`는 4:5)을 API 파라미터로 전달합니다. 비율은 `codex_exec.py`의 `TEMPLATES`에서 바꿉니다.
+- 호출마다 이미지 한 장 분량의 요금이 부과됩니다. 요청이 실패하면 HTTP 상태와 응답 일부가 오류 메시지에 포함됩니다.
+
+provider 선택과 등록은 `image_providers.py` 한 파일에서 하고, 실제 생성 로직은 호출 주체별 파일로 나뉘어 있습니다.
+
+| provider | 구현 파일 |
+|---|---|
+| `codex` | `codex_exec.py` (`generate_image_with_codex`) |
+| `agy` | `agy_exec.py` (`generate_image_with_agy`) |
+| `gemini_api` | `gemini_api_exec.py` (`generate_image_with_gemini_api`) |
+
+이미지를 만드는 방식(CLI 실행, LLM 호출, API 호출 등)과 상관없이 모든 provider 함수는 같은 규약을 따릅니다. 새 provider를 추가하려면 호출 주체에 맞는 `*_exec.py` 파일에 `(prompt, output_dir, output_name, aspect_ratio=None)`을 받아 `output_dir / output_name` 경로에 이미지를 만들고 그 경로를 반환하는 함수를 작성한 뒤, `image_providers.py`의 `IMAGE_PROVIDERS`에 등록합니다. 실패하면 예외를 발생시킵니다. 비율을 지정할 수 없는 provider는 `aspect_ratio`를 무시합니다.
 
 ## 출력
 

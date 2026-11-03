@@ -11,7 +11,7 @@ CODEX_SANDBOX = "danger-full-access"
 class TemplateSpec:
     """프롬프트 템플릿 경로 묶음입니다."""
 
-    def __init__(self, script_prompt, image_prompt, uses_news_context=False):
+    def __init__(self, script_prompt, image_prompt, uses_news_context=False, aspect_ratio=None):
         """
         스크립트 프롬프트와 이미지 프롬프트 경로를 보관합니다.
 
@@ -19,32 +19,38 @@ class TemplateSpec:
             script_prompt: 스크립트 생성 프롬프트 파일 경로.
             image_prompt: 이미지 생성 프롬프트 파일 경로.
             uses_news_context: 스크립트 생성 시 뉴스 컨텍스트를 함께 사용할지 여부.
+            aspect_ratio: 이미지 가로세로 비율 문자열(예: "16:9"). 비율 지정이 가능한 provider만 사용합니다.
         output:
             TemplateSpec 인스턴스의 내부 상태를 초기화합니다.
         """
         self.script_prompt = script_prompt
         self.image_prompt = image_prompt
         self.uses_news_context = uses_news_context
+        self.aspect_ratio = aspect_ratio
 
 
 TEMPLATES = {
     "explain_child": TemplateSpec(
         script_prompt=Path("prompt") / "SCRIPT_EXPLAN_CHILD.md",
         image_prompt=Path("prompt") / "IMAGE_EXPLAIN_CHILD.md",
+        aspect_ratio="16:9",
     ),
     "3s_quiz": TemplateSpec(
         script_prompt=Path("prompt") / "SCRIPT_3S_QUIZ.md",
         image_prompt=Path("prompt") / "IMAGE_3S_QUIZ.md",
+        aspect_ratio="4:5",
     ),
     "news_explain_child": TemplateSpec(
         script_prompt=Path("prompt") / "SCRIPT_NEWS_EXPLAIN_CHILD.md",
         image_prompt=Path("prompt") / "IMAGE_NEWS_EXPLAIN_CHILD.md",
         uses_news_context=True,
+        aspect_ratio="16:9",
     ),
     "news_3s_quiz": TemplateSpec(
         script_prompt=Path("prompt") / "SCRIPT_NEWS_3S_QUIZ.md",
         image_prompt=Path("prompt") / "IMAGE_NEWS_3S_QUIZ.md",
         uses_news_context=True,
+        aspect_ratio="4:5",
     ),
 }
 
@@ -81,6 +87,7 @@ def resolve_template(root_dir, template_key):
         script_prompt=root_dir / template.script_prompt,
         image_prompt=root_dir / template.image_prompt,
         uses_news_context=template.uses_news_context,
+        aspect_ratio=template.aspect_ratio,
     )
 
 
@@ -231,6 +238,24 @@ def run_codex_exec(prompt, output_dir):
 
     completed = subprocess.run(cmd, check=False, input=prompt, text=True, encoding="utf-8")
     return completed.returncode
+
+
+def generate_image_with_codex(prompt, output_dir, output_name, aspect_ratio=None):
+    """
+    codex exec로 이미지를 생성합니다. IMAGE_PROVIDER=codex 일 때 사용하는 provider 함수입니다.
+
+    input:
+        prompt: 이미지 생성 프롬프트.
+        output_dir: 이미지를 저장할 폴더.
+        output_name: 저장할 이미지 파일명.
+        aspect_ratio: 사용하지 않습니다.
+    output:
+        output_dir / output_name 경로. 실패하면 RuntimeError를 발생시킵니다.
+    """
+    exit_code = run_codex_exec(prompt=prompt, output_dir=output_dir)
+    if exit_code != 0:
+        raise RuntimeError(f"codex exec failed while generating image. exit_code={exit_code}")
+    return output_dir / output_name
 
 
 def resolve_codex_command():

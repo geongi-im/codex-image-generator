@@ -185,7 +185,7 @@ Boris Cherny (creator of Claude Code) keeps his team's file around 100 lines. Un
 
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).
 
-- (empty)
+- 이미지 provider 선택/등록은 `image_providers.py` 한 파일에만 두고, 호출 주체별 실행 로직은 `codex_exec.py`, `agy_exec.py`, `gemini_api_exec.py`처럼 `*_exec.py` 파일로 나눈다. `image_providers.py`에 실행 로직을 넣지 않는다.
 
 ---
 

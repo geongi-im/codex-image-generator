@@ -1,5 +1,5 @@
 import requests
-from typing import List, Optional
+from typing import List, Optional, Union
 import os
 from PIL import Image
 import io
@@ -172,6 +172,109 @@ class ApiUtil:
             error_msg = f"API 요청 중 오류 발생\n제목: {title}\n카테고리: {category}\n오류: {str(e)}"
             self.logger.error(error_msg)
             raise ApiError(500, error_msg)
+
+    # 회원 지정 발송 한 번에 보낼 수 있는 아이디 수 (서버 PushService::USER_IDS_MAX 와 같게)
+    PUSH_USER_IDS_MAX = 500
+
+    def send_push_to_users(self, user_ids: Union[str, List[str]], title: str, body: Optional[str] = None,
+                           link: Optional[str] = None, dedupe_key: Optional[str] = None):
+        """앱 푸시 회원 지정 발송 API 호출 (POST /api/push/send-users)
+
+        지정한 회원 중 활성 회원 + 마케팅 정보 수신 동의 + 알림을 켠 기기가 있는 회원에게만 보낸다.
+        .env 의 PUSH_API_KEY 를 X-Push-Key 헤더로 보낸다.
+
+        Args:
+            user_ids: 받을 회원 아이디(mq_member.mq_user_id). 한 명이면 문자열로 줘도 된다. 최대 500개
+            title: 알림 제목 (필수, 100자 이내)
+            body: 알림 본문 (500자 이내)
+            link: 알림을 눌렀을 때 열 주소. 우리 사이트 경로(/board-research/123) 또는 우리 사이트 주소
+            dedupe_key: 같은 키로는 한 번만 발송된다. 재시도해도 중복 발송되지 않게 날짜/대상 등을 넣어 만든다.
+                        받는 회원이 다르면 키도 달라야 한다. 예) "topsector:2026-11-11:hong123"
+
+        Returns:
+            서버 응답 dict. data.result 로 결과를 구분한다.
+              accepted  (202) 발송 시작. 기기별 결과는 서버 mq_push_logs 의 data.log_idx 행에 남는다.
+              no_target (200) 받을 수 있는 회원이 없어 보내지 않음
+              duplicate (409) 같은 dedupe_key 로 이미 보냄. 재시도 상황이므로 에러로 보지 않는다.
+            data.skipped_user_ids 에는 지정했지만 받지 못하는 아이디가 들어 있다.
+            (없는 아이디, 탈퇴/정지, 마케팅 미동의, 알림을 켠 기기 없음)
+
+        Raises:
+            ApiError: 키 미설정, 대상/제목 누락, 인증 실패(401), 입력값 오류(422),
+                      요청 과다(429, 분당 60회), 서버 FCM 미설정(503), 네트워크 오류 등
+        """
+        url = f"{self.api_base_url}/push/send-users"
+
+        push_api_key = os.getenv("PUSH_API_KEY")
+        if not push_api_key:
+            error_msg = "환경 변수 'PUSH_API_KEY'가 설정되어 있지 않습니다."
+            self.logger.error(error_msg)
+            raise ApiError(400, error_msg)
+
+        if isinstance(user_ids, str):
+            user_ids = [user_ids]
+        user_ids = [u.strip() for u in (user_ids or []) if u and u.strip()]
+        if not user_ids:
+            error_msg = "푸시를 받을 회원 아이디가 없습니다."
+            self.logger.error(error_msg)
+            raise ApiError(400, error_msg)
+        if len(user_ids) > self.PUSH_USER_IDS_MAX:
+            error_msg = f"한 번에 보낼 수 있는 회원은 {self.PUSH_USER_IDS_MAX}명까지입니다. (요청: {len(user_ids)}명)"
+            self.logger.error(error_msg)
+            raise ApiError(400, error_msg)
+
+        if not title or not title.strip():
+            error_msg = "푸시 제목이 비어 있습니다."
+            self.logger.error(error_msg)
+            raise ApiError(400, error_msg)
+
+        data = {"user_ids": user_ids, "title": title}
+        if body is not None:
+            data["body"] = body
+        if link is not None:
+            data["link"] = link
+        if dedupe_key is not None:
+            data["dedupe_key"] = dedupe_key
+
+        headers = self.headers.copy()
+        headers["X-Push-Key"] = push_api_key
+
+        self.logger.info(f"푸시 발송 요청 - 대상: {len(user_ids)}명, 제목: {title}, dedupe_key: {dedupe_key}")
+
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=10)
+        except requests.RequestException as e:
+            error_msg = f"푸시 API 요청 중 오류 발생\n제목: {title}\n오류: {str(e)}"
+            self.logger.error(error_msg)
+            raise ApiError(500, error_msg)
+
+        response.encoding = 'utf-8'
+        try:
+            response_data = response.json()
+        except ValueError:
+            error_msg = f"푸시 API JSON 응답 파싱 실패\n제목: {title}\n상태 코드: {response.status_code}\n응답: {response.text[:500]}"
+            self.logger.error(error_msg)
+            raise ApiError(response.status_code, error_msg)
+
+        data_part = response_data.get('data') or {}
+        result = data_part.get('result')
+
+        if response.status_code == 409 and result == 'duplicate':
+            self.logger.info(f"이미 발송된 푸시라 건너뜀 - dedupe_key: {dedupe_key}")
+            return response_data
+
+        if not response_data.get('success', False):
+            error_msg = f"푸시 발송 실패\n제목: {title}\n상태 코드: {response.status_code}\n응답: {response.text[:500]}"
+            self.logger.error(error_msg)
+            raise ApiError(response.status_code, error_msg)
+
+        self.logger.info(
+            f"푸시 발송 {result} - 제목: {title}, 대상 기기: {data_part.get('target_count')}, log_idx: {data_part.get('log_idx')}"
+        )
+        skipped = data_part.get('skipped_user_ids') or []
+        if skipped:
+            self.logger.info(f"푸시를 받지 못하는 회원 {len(skipped)}명 (미동의/기기 없음 등): {skipped}")
+        return response_data
 
 if __name__ == "__main__":
     # API 테스트
